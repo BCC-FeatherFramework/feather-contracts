@@ -1,0 +1,264 @@
+local resourceName = GetCurrentResourceName()
+
+local function Runner(label)
+    local passed, total = 0, 0
+    local runner = {}
+    function runner.Check(name, condition)
+        total = total + 1
+        if condition then passed = passed + 1 end
+        print(('[%s] %-34s %s'):format(label, name, condition and 'PASS' or 'FAIL'))
+    end
+    function runner.Done(note)
+        print(('[%s] done %d/%d passed%s'):format(label, passed, total, note and (' ' .. note) or ''))
+    end
+    return runner
+end
+
+local function Same(left, right)
+    if #left ~= #right then return false end
+    for index = 1, #left do if left[index] ~= right[index] then return false end end
+    return true
+end
+
+RegisterCommand('ContractsFoundationSmokeTest', function(source)
+    if source ~= 0 then return end
+    local t = Runner('ContractsFoundationSmokeTest')
+    local capabilities = ContractsFoundation.GetCapabilities()
+    local health = ContractsFoundation.GetHealth()
+    t.Check('capabilities', capabilities.ok and capabilities.value.contract == 1
+        and capabilities.value.features.settlement == 1 and capabilities.value.features.amendments == 0)
+    t.Check('health ready', health.state == 'ready' and health.checks.migrations ~= nil
+        and health.checks['feather-economy'] ~= nil and health.checks.events ~= nil)
+    t.Check('migration ledger', tonumber(DB.value(
+        "SELECT COUNT(*) FROM `contract_schema_migrations` WHERE `id`='001_contracts_foundation'")) == 1)
+
+    local accepted = ContractsTypes.Transitions(true, true)
+    local direct = ContractsTypes.Transitions(false, false)
+    t.Check('acceptance transitions', Same(accepted.accept, { 'issued' })
+        and Same(accepted.settle, { 'accepted', 'due', 'defaulted' })
+        and Same(accepted.markDue, { 'accepted' }))
+    t.Check('direct transitions', #direct.accept == 0 and #direct.dispute == 0
+        and Same(direct.settle, { 'issued', 'due', 'defaulted' }))
+    t.Check('settled is terminal', not ContractsTypes.Allows(accepted, 'cancel', 'settled')
+        and not ContractsTypes.Allows(accepted, 'settle', 'settled')
+        and not ContractsTypes.Allows(accepted, 'settle', 'disputed'))
+
+    local base = { typeKey = 'smoke_type', label = 'Smoke', issuerTypes = { 'system' },
+        creditorTypes = { 'system' } }
+    t.Check('valid definition normalizes', ContractsTypes.Normalize(base).ok)
+    local badKey = ContractsTypes.Normalize({ typeKey = 'Bad-Key', label = 'x', issuerTypes = { 'system' },
+        creditorTypes = { 'system' } })
+    t.Check('invalid key rejected', not badKey.ok and badKey.code == 'invalid_input')
+    local extra = ContractsTypes.Normalize({ typeKey = 'smoke_type', label = 'x', issuerTypes = { 'system' },
+        creditorTypes = { 'system' }, balance = 10 })
+    t.Check('unknown field rejected', not extra.ok and extra.code == 'invalid_input')
+    local unsettleable = ContractsTypes.Normalize({ typeKey = 'smoke_type', label = 'x', issuerTypes = { 'system' },
+        creditorTypes = { 'system' }, debtorMaySettle = false, issuerMaySettle = false })
+    t.Check('unsettleable type rejected', not unsettleable.ok)
+    if Config.Settlement.creditorTypes.organization ~= true then
+        local organization = ContractsTypes.Normalize({ typeKey = 'smoke_type', label = 'x',
+            issuerTypes = { 'organization' }, creditorTypes = { 'organization' } })
+        t.Check('organization creditor gated', not organization.ok
+            and organization.code == 'creditor_type_unsupported')
+    end
+    local untrusted = ContractsTypes.Register(base, 'untrusted-smoke-resource')
+    t.Check('untrusted issuer rejected', not untrusted.ok and untrusted.code == 'authorization_denied')
+    local draft = ContractsObligations.CreateDraft({}, nil, 'untrusted-smoke-resource')
+    t.Check('invalid draft rejected', not draft.ok and draft.code == 'invalid_input')
+    local read = ContractsObligations.GetObligation({ obligationId = '00000000-0000-0000-0000-000000000099' },
+        'untrusted-smoke-resource')
+    t.Check('missing obligation hidden', not read.ok and read.code == 'obligation_not_found')
+    local list = ContractsObligations.ListPartyObligations({ party = { type = 'character',
+        id = '00000000-0000-0000-0000-000000000099' } }, 'untrusted-smoke-resource')
+    t.Check('unscoped list rejected', not list.ok and list.code == 'authorization_denied')
+    local reconcile = ContractsSettlement.Reconcile('untrusted-smoke-resource')
+    t.Check('untrusted reconcile rejected', not reconcile.ok and reconcile.code == 'authorization_denied')
+
+    if Config.ClientRoutes.enabled then
+        local routes = exports['feather-core']:GetRPCRoutes()
+        local owned = {}
+        for _, route in ipairs(type(routes) == 'table' and routes.ok and routes.value or {}) do
+            if route.owner == resourceName and route.requireCharacter == true then owned[route.route] = true end
+        end
+        local all = true
+        for _, name in ipairs(ContractsRoutes.Names()) do all = all and owned[name] == true end
+        t.Check('client routes registered', all)
+    end
+    t.Done('(read-only)')
+end, true)
+
+RegisterCommand('ContractsAuditSmokeTest', function(source)
+    if source ~= 0 then return end
+    local t = Runner('ContractsAuditSmokeTest')
+    local outbox = ContractsOutbox.GetState()
+    t.Check('outbox running', outbox.ok and outbox.value.running == true)
+    t.Check('scheduler running', ContractsScheduler.IsRunning())
+    t.Check('outbox states valid', tonumber(DB.value(
+        "SELECT COUNT(*) FROM `contract_outbox` WHERE `status` NOT IN ('pending','published')")) == 0)
+    local audit = ContractsSettlement.Audit()
+    for _, key in ipairs({ 'settledWithoutCommittedSettlement', 'committedSettlementNotSettled',
+        'pendingFlagWithoutSettlement', 'pendingSettlementWithoutFlag', 'multipleCommitted', 'amountMismatch' }) do
+        t.Check(key, audit[key] == 0)
+    end
+    t.Check('issued have frozen creditor', tonumber(DB.value([[SELECT COUNT(*) FROM `contract_obligations`
+        WHERE `status`<>'draft' AND `issued_at` IS NOT NULL AND `creditor_account_id` IS NULL]])) == 0)
+    t.Check('terminal timestamps present', tonumber(DB.value([[SELECT COUNT(*) FROM `contract_obligations`
+        WHERE (`status`='settled' AND `settled_at` IS NULL) OR (`status`='cancelled' AND `cancelled_at` IS NULL)
+           OR (`status`='defaulted' AND `defaulted_at` IS NULL)]])) == 0)
+    t.Check('every obligation audited', tonumber(DB.value([[SELECT COUNT(*) FROM `contract_obligations` o
+        WHERE NOT EXISTS (SELECT 1 FROM `contract_actions` a WHERE a.`obligation_id`=o.`obligation_id`)]])) == 0)
+    t.Done(('pending=%s published=%s pendingSettlements=%s stuck=%s (read-only)'):format(
+        tostring(outbox.ok and outbox.value.pending), tostring(outbox.ok and outbox.value.published),
+        tostring(audit.pendingSettlements), tostring(audit.stuckSettlements)))
+end, true)
+
+RegisterCommand('ContractsReleaseSmokeTest', function(source)
+    if source ~= 0 then return end
+    local t = Runner('ContractsReleaseSmokeTest')
+    local registered = {}
+    local callable = type(GetRegisteredCommands) == 'function'
+    if callable then
+        for _, command in ipairs(GetRegisteredCommands() or {}) do
+            if type(command) == 'table' and type(command.name) == 'string' then registered[command.name] = true end
+        end
+    end
+    t.Check('service ready', ContractsFoundation.IsReady())
+    t.Check('development disabled', Config.DevMode == false)
+    t.Check('policy enabled', Config.Authorization.enabled == true)
+    t.Check('self not trusted issuer', Config.Access.trustedIssuers[resourceName] ~= true)
+    t.Check('development commands absent', callable and registered.ContractsLiveTest ~= true)
+    t.Check('reconcile command available', registered.ContractsReconcile == true)
+    t.Done('(read-only)')
+end, true)
+
+if not Config.DevMode then return end
+
+-- Development acceptance. Moves at most 0.01 of the chosen currency from the
+-- debtor to the creditor when the debtor has funds, and leaves one defaulted
+-- 0.01 obligation as evidence of due/default processing.
+RegisterCommand('ContractsLiveTest', function(source, args)
+    if source ~= 0 then return end
+    local debtorSource, creditorSource = tonumber(args and args[1]), tonumber(args and args[2])
+    local runId, currency = args and args[3], (args and args[4]) or 'dollars'
+    local debtor = debtorSource and exports['feather-core']:GetSessionContext(debtorSource) or nil
+    local creditor = creditorSource and exports['feather-core']:GetSessionContext(creditorSource) or nil
+    if type(debtor) ~= 'table' or not debtor.ok or type(creditor) ~= 'table' or not creditor.ok
+        or debtor.value.characterId == creditor.value.characterId
+        or type(runId) ~= 'string' or not runId:match('^[A-Za-z0-9][A-Za-z0-9_-]*$') or #runId > 40 then
+        print('[ContractsLiveTest] usage: ContractsLiveTest <debtor source> <creditor source> <fresh runId> [currency]')
+        return
+    end
+    local t = Runner('ContractsLiveTest')
+    local debtorId, creditorId = debtor.value.characterId:lower(), creditor.value.characterId:lower()
+    local function key(suffix) return ('live-%s-%s'):format(runId, suffix) end
+    local typed = ContractsTypes.Register({ typeKey = 'contracts_smoke_invoice', label = 'Smoke invoice',
+        requiresAcceptance = true, debtorMayDispute = true, issuerTypes = { 'character' },
+        creditorTypes = { 'character', 'system' } }, resourceName)
+    t.Check('type registered', typed.ok)
+    local overdueType = ContractsTypes.Register({ typeKey = 'contracts_smoke_fine', label = 'Smoke fine',
+        defaultAfterSeconds = 0, issuerTypes = { 'system' }, creditorTypes = { 'system' } }, resourceName)
+    t.Check('second type registered', overdueType.ok)
+    if not typed.ok or not overdueType.ok then return t.Done() end
+
+    local draftRequest = { requestId = key('draft'), obligationType = 'contracts_smoke_invoice',
+        issuer = { type = 'character', id = creditorId }, debtor = { type = 'character', id = debtorId },
+        creditor = { type = 'character', id = creditorId }, amount = 1, currency = currency,
+        dueInSeconds = 3600, referenceType = 'smoke', referenceId = runId }
+    local draft = ContractsObligations.CreateDraft(draftRequest, nil, resourceName)
+    local replay = ContractsObligations.CreateDraft(draftRequest, nil, resourceName)
+    t.Check('draft created', draft.ok and draft.value.status == 'draft')
+    t.Check('draft replayed', replay.ok and replay.value.replayed == true
+        and draft.ok and replay.value.obligationId == draft.value.obligationId)
+    local changed = {}
+    for field, value in pairs(draftRequest) do changed[field] = value end
+    changed.amount = 2
+    local conflict = ContractsObligations.CreateDraft(changed, nil, resourceName)
+    t.Check('payload reuse rejected', not conflict.ok and conflict.code == 'idempotency_conflict')
+    if not draft.ok then return t.Done() end
+    local id = draft.value.obligationId
+
+    local issued = ContractsObligations.IssueObligation({ requestId = key('issue'), obligationId = id }, nil, resourceName)
+    t.Check('issued', issued.ok and issued.value.status == 'issued' and issued.value.creditorAccountId ~= nil)
+    if not issued.ok then
+        print(('[ContractsLiveTest] issue failed code=%s; with policy enabled, grant feather-contracts '
+            .. 'its own service actions in feather-admin servicePolicy for this test'):format(tostring(issued.code)))
+        return t.Done()
+    end
+    local early = ContractsSettlement.SettleObligation({ requestId = key('early'), obligationId = id },
+        { actorSource = debtorSource, actorCharacterId = debtorId }, resourceName, false)
+    t.Check('settle before accept rejected', not early.ok and early.code == 'invalid_state')
+    local wrongActor = ContractsAPI.AcceptObligation({ requestId = key('accept-wrong'), obligationId = id },
+        { actorSource = creditorSource }, resourceName)
+    t.Check('non-debtor accept rejected', not wrongActor.ok and wrongActor.code == 'authorization_denied')
+    local accepted = ContractsAPI.AcceptObligation({ requestId = key('accept'), obligationId = id },
+        { actorSource = debtorSource }, resourceName)
+    t.Check('debtor accepted', accepted.ok and accepted.value.status == 'accepted')
+
+    local settleRequest = { requestId = key('settle'), obligationId = id }
+    local settled = ContractsAPI.SettleObligation(settleRequest, { actorSource = debtorSource }, resourceName)
+    if settled.ok then
+        local again = ContractsAPI.SettleObligation(settleRequest, { actorSource = debtorSource }, resourceName)
+        local second = ContractsAPI.SettleObligation({ requestId = key('settle-2'), obligationId = id },
+            { actorSource = debtorSource }, resourceName)
+        t.Check('settled with transaction', settled.value.status == 'settled'
+            and settled.value.settlementTransactionId ~= nil)
+        t.Check('settlement replayed', again.ok and again.value.replayed == true
+            and again.value.settlementTransactionId == settled.value.settlementTransactionId)
+        t.Check('no double payment', not second.ok and second.code == 'invalid_state')
+        t.Check('one committed settlement', tonumber(DB.value([[SELECT COUNT(*) FROM `contract_settlements`
+            WHERE `obligation_id`=? AND `status`='committed']], id)) == 1)
+    else
+        t.Check('insufficient funds reported', settled.code == 'insufficient_funds')
+        local after = ContractsObligationRepository.Get(id)
+        t.Check('obligation still payable', after.ok and after.value.status == 'accepted'
+            and after.value.settlementState == 'none')
+        local cancelled = ContractsObligations.CancelObligation({ requestId = key('cancel'), obligationId = id,
+            reasonCode = 'smoke.cleanup' }, nil, resourceName)
+        t.Check('unpaid obligation cancelled', cancelled.ok and cancelled.value.status == 'cancelled')
+    end
+
+    local disputeDraft = ContractsObligations.CreateDraft({ requestId = key('d-draft'),
+        obligationType = 'contracts_smoke_invoice', issuer = { type = 'character', id = creditorId },
+        debtor = { type = 'character', id = debtorId }, creditor = { type = 'system' }, amount = 1,
+        currency = currency, dueInSeconds = 3600 }, nil, resourceName)
+    local disputeId = disputeDraft.ok and disputeDraft.value.obligationId
+    local disputeIssued = disputeId and ContractsObligations.IssueObligation({ requestId = key('d-issue'),
+        obligationId = disputeId }, nil, resourceName) or disputeDraft
+    local disputed = disputeIssued.ok and ContractsAPI.DisputeObligation({ requestId = key('d-dispute'),
+        obligationId = disputeId, reasonCode = 'smoke.amount' }, { actorSource = debtorSource }, resourceName) or disputeIssued
+    t.Check('debtor disputed', disputed.ok and disputed.value.status == 'disputed')
+    local upheld = disputed.ok and ContractsObligations.ResolveDispute({ requestId = key('d-resolve'),
+        obligationId = disputeId, outcome = 'upheld', reasonCode = 'smoke.upheld' }, nil, resourceName) or disputed
+    t.Check('dispute upheld restores status', upheld.ok and upheld.value.status == 'issued')
+    local stale = upheld.ok and ContractsObligations.CancelObligation({ requestId = key('d-stale'),
+        obligationId = disputeId, reasonCode = 'smoke.cleanup', expectedRevision = 1 }, nil, resourceName) or upheld
+    t.Check('stale revision rejected', not stale.ok and stale.code == 'revision_conflict')
+    local cleaned = upheld.ok and ContractsObligations.CancelObligation({ requestId = key('d-cancel'),
+        obligationId = disputeId, reasonCode = 'smoke.cleanup' }, nil, resourceName) or upheld
+    t.Check('disputed obligation cancelled', cleaned.ok and cleaned.value.status == 'cancelled')
+
+    local fineDraft = ContractsObligations.CreateDraft({ requestId = key('f-draft'),
+        obligationType = 'contracts_smoke_fine', issuer = { type = 'system' },
+        debtor = { type = 'character', id = debtorId }, creditor = { type = 'system' }, amount = 1,
+        currency = currency, dueInSeconds = 0 }, nil, resourceName)
+    local fineId = fineDraft.ok and fineDraft.value.obligationId
+    local fineIssued = fineId and ContractsObligations.IssueObligation({ requestId = key('f-issue'),
+        obligationId = fineId }, nil, resourceName) or fineDraft
+    if fineIssued.ok then
+        Wait(1500)
+        ContractsScheduler.RunOnce()
+        local overdue = ContractsObligationRepository.Get(fineId)
+        t.Check('scheduler marked due then defaulted', overdue.ok and overdue.value.status == 'defaulted')
+        local actions = DB.query([[SELECT `action_type` FROM `contract_actions` WHERE `obligation_id`=?
+            ORDER BY `created_at`,`action_id`]], fineId) or {}
+        local seen = {}
+        for _, row in ipairs(actions) do seen[row.action_type] = true end
+        t.Check('due and default audited', seen.due == true and seen.defaulted == true)
+    else
+        t.Check('fine issued', false)
+    end
+    local audit = ContractsSettlement.Audit()
+    t.Check('settlement integrity', audit.settledWithoutCommittedSettlement == 0
+        and audit.committedSettlementNotSettled == 0 and audit.multipleCommitted == 0)
+    t.Done(('run=%s'):format(runId))
+end, true)
