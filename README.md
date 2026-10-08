@@ -11,7 +11,7 @@ policy, court gameplay, bank UI, debt-collection gameplay, or balances. Money
 moves only in Feather Economy. Contracts is not a quest or scripting engine.
 
 Status: implements phases C1–C3 of the
-[Contracts master plan](../feather-framework-docs-main/feather-contracts/Feather_Contracts_Master_Plan.md),
+[Contracts master plan](https://github.com/FeatherFramework/feather-framework-docs/blob/main/feather-contracts/Feather_Contracts_Master_Plan.md),
 plus the type registry C4 needs to prove a second obligation type. It has not
 yet passed live acceptance.
 
