@@ -140,18 +140,27 @@ if not Config.DevMode then return end
 -- as evidence of due/default processing.
 RegisterCommand('ContractsLiveTest', function(source, args)
     if source ~= 0 then return end
-    local debtorSource, creditorSource = tonumber(args and args[1]), tonumber(args and args[2])
+    -- Each party is a connected player's server id or a character UUID; nobody
+    -- needs to be online. Debtor actions run with a context built from that
+    -- character (what Core's session supplies for a connected player).
+    local function Character(value)
+        local src = tonumber(value)
+        if src then
+            local session = exports['feather-core']:GetSessionContext(src)
+            return type(session) == 'table' and session.ok and session.value.characterId:lower() or nil
+        end
+        return ContractsValidation.Uuid(value) and value:lower() or nil
+    end
+    local debtorId, creditorId = Character(args and args[1]), Character(args and args[2])
     local runId, currency = args and args[3], (args and args[4]) or 'dollars'
-    local debtor = debtorSource and exports['feather-core']:GetSessionContext(debtorSource) or nil
-    local creditor = creditorSource and exports['feather-core']:GetSessionContext(creditorSource) or nil
-    if type(debtor) ~= 'table' or not debtor.ok or type(creditor) ~= 'table' or not creditor.ok
-        or debtor.value.characterId == creditor.value.characterId
+    if not debtorId or not creditorId or debtorId == creditorId
         or type(runId) ~= 'string' or not runId:match('^[A-Za-z0-9][A-Za-z0-9_-]*$') or #runId > 40 then
-        print('[ContractsLiveTest] usage: ContractsLiveTest <debtor source> <creditor source> <fresh runId> [currency]')
+        print('[ContractsLiveTest] usage: ContractsLiveTest <debtor id|character UUID> '
+            .. '<creditor id|character UUID> <fresh runId> [currency]')
         return
     end
     local t = Runner('ContractsLiveTest')
-    local debtorId, creditorId = debtor.value.characterId:lower(), creditor.value.characterId:lower()
+    local function Actor(characterId) return { resource = resourceName, actorCharacterId = characterId } end
     local function key(suffix) return ('live-%s-%s'):format(runId, suffix) end
     local typed = ContractsTypes.Register({ typeKey = 'contracts_smoke_invoice', label = 'Smoke invoice',
         requiresAcceptance = true, debtorMayDispute = true, issuerTypes = { 'character' },
@@ -187,21 +196,21 @@ RegisterCommand('ContractsLiveTest', function(source, args)
         return t.Done()
     end
     local early = ContractsSettlement.SettleObligation({ requestId = key('early'), obligationId = id },
-        { actorSource = debtorSource, actorCharacterId = debtorId }, resourceName, false)
+        Actor(debtorId), resourceName, false)
     t.Check('settle before accept rejected', not early.ok and early.code == 'invalid_state')
-    local wrongActor = ContractsAPI.AcceptObligation({ requestId = key('accept-wrong'), obligationId = id },
-        { actorSource = creditorSource }, resourceName)
+    local wrongActor = ContractsObligations.AcceptObligation({ requestId = key('accept-wrong'), obligationId = id },
+        Actor(creditorId), resourceName, false)
     t.Check('non-debtor accept rejected', not wrongActor.ok and wrongActor.code == 'authorization_denied')
-    local accepted = ContractsAPI.AcceptObligation({ requestId = key('accept'), obligationId = id },
-        { actorSource = debtorSource }, resourceName)
+    local accepted = ContractsObligations.AcceptObligation({ requestId = key('accept'), obligationId = id },
+        Actor(debtorId), resourceName, false)
     t.Check('debtor accepted', accepted.ok and accepted.value.status == 'accepted')
 
     local settleRequest = { requestId = key('settle'), obligationId = id }
-    local settled = ContractsAPI.SettleObligation(settleRequest, { actorSource = debtorSource }, resourceName)
+    local settled = ContractsSettlement.SettleObligation(settleRequest, Actor(debtorId), resourceName, false)
     if settled.ok then
-        local again = ContractsAPI.SettleObligation(settleRequest, { actorSource = debtorSource }, resourceName)
-        local second = ContractsAPI.SettleObligation({ requestId = key('settle-2'), obligationId = id },
-            { actorSource = debtorSource }, resourceName)
+        local again = ContractsSettlement.SettleObligation(settleRequest, Actor(debtorId), resourceName, false)
+        local second = ContractsSettlement.SettleObligation({ requestId = key('settle-2'), obligationId = id },
+            Actor(debtorId), resourceName, false)
         t.Check('settled with transaction', settled.value.status == 'settled'
             and settled.value.settlementTransactionId ~= nil)
         t.Check('settlement replayed', again.ok and again.value.replayed == true
@@ -220,12 +229,12 @@ RegisterCommand('ContractsLiveTest', function(source, args)
         local lostId = lostDraft.ok and lostDraft.value.obligationId
         local lostReady = lostId and ContractsObligations.IssueObligation({ requestId = key('t-issue'),
             obligationId = lostId }, nil, resourceName) or lostDraft
-        lostReady = lostReady.ok and ContractsAPI.AcceptObligation({ requestId = key('t-accept'),
-            obligationId = lostId }, { actorSource = debtorSource }, resourceName) or lostReady
+        lostReady = lostReady.ok and ContractsObligations.AcceptObligation({ requestId = key('t-accept'),
+            obligationId = lostId }, Actor(debtorId), resourceName, false) or lostReady
         if lostReady.ok then
             ContractsEconomy.simulatedLostReplies = 1
-            local lost = ContractsAPI.SettleObligation({ requestId = key('t-settle'), obligationId = lostId },
-                { actorSource = debtorSource }, resourceName)
+            local lost = ContractsSettlement.SettleObligation({ requestId = key('t-settle'), obligationId = lostId },
+                Actor(debtorId), resourceName, false)
             ContractsEconomy.simulatedLostReplies = 0
             local pendingRow = DB.one([[SELECT `settlement_id`,`economy_idempotency_key` FROM `contract_settlements`
                 WHERE `obligation_id`=? AND `status`='pending']], lostId)
@@ -270,8 +279,8 @@ RegisterCommand('ContractsLiveTest', function(source, args)
     local disputeId = disputeDraft.ok and disputeDraft.value.obligationId
     local disputeIssued = disputeId and ContractsObligations.IssueObligation({ requestId = key('d-issue'),
         obligationId = disputeId }, nil, resourceName) or disputeDraft
-    local disputed = disputeIssued.ok and ContractsAPI.DisputeObligation({ requestId = key('d-dispute'),
-        obligationId = disputeId, reasonCode = 'smoke.amount' }, { actorSource = debtorSource }, resourceName) or disputeIssued
+    local disputed = disputeIssued.ok and ContractsObligations.DisputeObligation({ requestId = key('d-dispute'),
+        obligationId = disputeId, reasonCode = 'smoke.amount' }, Actor(debtorId), resourceName, false) or disputeIssued
     t.Check('debtor disputed', disputed.ok and disputed.value.status == 'disputed')
     local upheld = disputed.ok and ContractsObligations.ResolveDispute({ requestId = key('d-resolve'),
         obligationId = disputeId, outcome = 'upheld', reasonCode = 'smoke.upheld' }, nil, resourceName) or disputed

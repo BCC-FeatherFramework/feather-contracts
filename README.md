@@ -21,7 +21,7 @@ yet passed live acceptance.
 | `ContractsAuditSmokeTest` (12 checks) | Passed 12/12 on the server 2026-10-13 |
 | `ContractsReleaseSmokeTest` (6 checks) | Passed 6/6 on the server 2026-10-13 |
 | `ContractsReconcile` | Healthy on the server 2026-10-13 (no settlements yet) |
-| `ContractsLiveTest` (DevMode, two players) | Not yet run; now includes the Economy timeout recovery and journal checks |
+| `ContractsLiveTest` (DevMode, runs offline) | Not yet run; now includes the Economy timeout recovery and journal checks |
 | Settlement checked against Economy's journal | Implemented; needs feather-economy with `GetTransaction` (`transactionRead`) |
 | Real issuer (C4) | `bcc-housing` property tax and rent implemented, not yet run live |
 
@@ -305,8 +305,12 @@ ContractsReconcile               replays pending settlements, checks the Economy
 With `Config.DevMode = true` on an isolated development server only:
 
 ```text
-ContractsLiveTest <debtor source> <creditor source> <fresh runId> [currency]
+ContractsLiveTest <debtor id|character UUID> <creditor id|character UUID> <fresh runId> [currency]
 ```
+
+Both parties may be offline: pass character UUIDs (a connected player's
+server id also works). Debtor actions run with the debtor's character as
+actor, as Core's session would supply it.
 
 The live test registers two development types owned by feather-contracts,
 then exercises draft replay and payload conflict, issuance, acceptance,
