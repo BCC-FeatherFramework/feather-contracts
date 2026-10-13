@@ -98,7 +98,8 @@ local function ValidateConfig()
         or type(settlement.referenceType) ~= 'string' or #settlement.referenceType > 48
         or type(settlement.creditorTypes) ~= 'table'
         or not Integer(settlement.retryDelaySeconds, 1, 3600)
-        or not Integer(settlement.maximumAttempts, 1, 1000) then
+        or not Integer(settlement.maximumAttempts, 1, 1000)
+        or not Integer(settlement.verifyBatchSize, 1, 1000) then
         return ContractsResults.Err('invalid_config', 'Config.Settlement is invalid.')
     end
     for key, enabled in pairs(settlement.creditorTypes) do
@@ -245,6 +246,7 @@ function ContractsFoundation.GetCapabilities()
             settlement = 1,
             settlementRecovery = 1,
             reconciliation = 1,
+            economyReconciliation = 1,
             cancellation = 1,
             disputes = 1,
             dueProcessing = 1,

@@ -75,6 +75,13 @@ RegisterCommand('ContractsReconcile', function(source)
     local processed, audit = result.value.processed, result.value.audit
     print(('[ContractsReconcile] settlements processed=%d committed=%d rejected=%d stillPending=%d')
         :format(processed.processed, processed.committed, processed.rejected, processed.pending))
+    local journal = result.value.journal
+    if journal.available then
+        print(('[ContractsReconcile] economy journal checked=%d verified=%d mismatch=%d missing=%d deferred=%d')
+            :format(journal.checked, journal.verified, journal.mismatch, journal.missing, journal.deferred))
+    else
+        print('[ContractsReconcile] economy journal unavailable (feather-economy has no transactionRead)')
+    end
     local keys = {}
     for key in pairs(audit) do keys[#keys + 1] = key end
     table.sort(keys)

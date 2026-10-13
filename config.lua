@@ -8,6 +8,7 @@ Config = {
         -- type key to its first owner permanently; only that owner may issue,
         -- cancel, default, or resolve disputes for obligations of that type.
         trustedIssuers = {
+            ['bcc-housing'] = true
         },
         -- Resources allowed to read any obligation (support and admin tooling).
         -- Type owners can always read obligations of their own types.
@@ -42,7 +43,9 @@ Config = {
         -- A settlement whose Economy outcome is unknown stays pending and is
         -- replayed with its original idempotency key after this delay.
         retryDelaySeconds = 15,
-        maximumAttempts = 20
+        maximumAttempts = 20,
+        -- Committed settlements compared with Economy's journal per reconcile run.
+        verifyBatchSize = 100
     },
     Scheduler = {
         intervalMs = 30000,

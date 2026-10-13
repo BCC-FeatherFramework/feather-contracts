@@ -30,7 +30,8 @@ RegisterCommand('ContractsFoundationSmokeTest', function(source)
     t.Check('health ready', health.state == 'ready' and health.checks.migrations ~= nil
         and health.checks['feather-economy'] ~= nil and health.checks.events ~= nil)
     t.Check('migration ledger', tonumber(DB.value(
-        "SELECT COUNT(*) FROM `contract_schema_migrations` WHERE `id`='001_contracts_foundation'")) == 1)
+        "SELECT COUNT(*) FROM `contract_schema_migrations` WHERE `id` IN ('001_contracts_foundation',"
+            .. "'002_settlement_economy_check')")) == 2)
 
     local accepted = ContractsTypes.Transitions(true, true)
     local direct = ContractsTypes.Transitions(false, false)
@@ -133,9 +134,10 @@ end, true)
 
 if not Config.DevMode then return end
 
--- Development acceptance. Moves at most 0.01 of the chosen currency from the
--- debtor to the creditor when the debtor has funds, and leaves one defaulted
--- 0.01 obligation as evidence of due/default processing.
+-- Development acceptance. When the debtor has at least 0.02 of the chosen
+-- currency it moves 0.01 to the creditor and 0.01 to the system sink (the
+-- Economy timeout recovery check), and it leaves one defaulted 0.01 obligation
+-- as evidence of due/default processing.
 RegisterCommand('ContractsLiveTest', function(source, args)
     if source ~= 0 then return end
     local debtorSource, creditorSource = tonumber(args and args[1]), tonumber(args and args[2])
@@ -207,6 +209,50 @@ RegisterCommand('ContractsLiveTest', function(source, args)
         t.Check('no double payment', not second.ok and second.code == 'invalid_state')
         t.Check('one committed settlement', tonumber(DB.value([[SELECT COUNT(*) FROM `contract_settlements`
             WHERE `obligation_id`=? AND `status`='committed']], id)) == 1)
+
+        -- Economy timeout after the money moved: the reply is dropped, the
+        -- settlement stays pending, and a replay with the same key finishes it
+        -- without a second transfer.
+        local lostDraft = ContractsObligations.CreateDraft({ requestId = key('t-draft'),
+            obligationType = 'contracts_smoke_invoice', issuer = { type = 'character', id = creditorId },
+            debtor = { type = 'character', id = debtorId }, creditor = { type = 'system' }, amount = 1,
+            currency = currency, dueInSeconds = 3600 }, nil, resourceName)
+        local lostId = lostDraft.ok and lostDraft.value.obligationId
+        local lostReady = lostId and ContractsObligations.IssueObligation({ requestId = key('t-issue'),
+            obligationId = lostId }, nil, resourceName) or lostDraft
+        lostReady = lostReady.ok and ContractsAPI.AcceptObligation({ requestId = key('t-accept'),
+            obligationId = lostId }, { actorSource = debtorSource }, resourceName) or lostReady
+        if lostReady.ok then
+            ContractsEconomy.simulatedLostReplies = 1
+            local lost = ContractsAPI.SettleObligation({ requestId = key('t-settle'), obligationId = lostId },
+                { actorSource = debtorSource }, resourceName)
+            ContractsEconomy.simulatedLostReplies = 0
+            local pendingRow = DB.one([[SELECT `settlement_id`,`economy_idempotency_key` FROM `contract_settlements`
+                WHERE `obligation_id`=? AND `status`='pending']], lostId)
+            local function Posted()
+                return pendingRow and tonumber(DB.value([[SELECT COUNT(*) FROM `economy_transactions`
+                    WHERE `source_resource`=? AND `idempotency_key`=? AND `status`='committed']],
+                    resourceName, pendingRow.economy_idempotency_key)) or -1
+            end
+            t.Check('timeout leaves settlement pending', not lost.ok and lost.code == 'settlement_pending'
+                and pendingRow ~= nil)
+            t.Check('money moved during timeout', Posted() == 1)
+            ContractsSettlement.ProcessPending(Config.Scheduler.batchSize, true)
+            local recovered = ContractsObligationRepository.Get(lostId)
+            t.Check('replay settles after timeout', recovered.ok and recovered.value.status == 'settled'
+                and recovered.value.settlementState == 'none')
+            t.Check('no second transfer after timeout', Posted() == 1)
+        else
+            t.Check('timeout obligation ready', false)
+        end
+        if ContractsEconomy.CanReadTransactions() then
+            ContractsSettlement.VerifyWithEconomy(Config.Settlement.verifyBatchSize)
+            t.Check('settlements match economy journal', tonumber(DB.value([[SELECT COUNT(*)
+                FROM `contract_settlements` WHERE `obligation_id` IN (?,?) AND `status`='committed'
+                AND `economy_check`='verified']], id, lostId or id)) == (lostId and 2 or 1))
+        else
+            print('[ContractsLiveTest] feather-economy has no GetTransaction; journal check skipped')
+        end
     else
         t.Check('insufficient funds reported', settled.code == 'insufficient_funds')
         local after = ContractsObligationRepository.Get(id)

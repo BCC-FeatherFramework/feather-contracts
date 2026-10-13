@@ -21,8 +21,9 @@ yet passed live acceptance.
 | `ContractsAuditSmokeTest` (12 checks) | Passed 12/12 on the server 2026-10-13 |
 | `ContractsReleaseSmokeTest` (6 checks) | Passed 6/6 on the server 2026-10-13 |
 | `ContractsReconcile` | Healthy on the server 2026-10-13 (no settlements yet) |
-| `ContractsLiveTest` (DevMode, two players) | Not yet run |
-| Second obligation type (C4) through a real issuer | Not yet proven |
+| `ContractsLiveTest` (DevMode, two players) | Not yet run; now includes the Economy timeout recovery and journal checks |
+| Settlement checked against Economy's journal | Implemented; needs feather-economy with `GetTransaction` (`transactionRead`) |
+| Real issuer (C4) | `bcc-housing` property tax and rent implemented, not yet run live |
 
 ## Dependencies and start order
 
@@ -182,7 +183,7 @@ local issued = contracts:IssueObligation({
 | `MarkDefaulted({ requestId, obligationId, reasonCode, expectedRevision? }, context?)` | type owner | Policy `contracts.obligation.default`; from `due` only |
 | `GetObligation({ obligationId })` | owner, issuer, trusted reader | Others receive `obligation_not_found` |
 | `ListPartyObligations({ party, role?, statuses?, obligationType?, limit?, cursor? })` | trusted reader, or owner filtering its own type | Cursor-paginated, newest first |
-| `ReconcileSettlements()` | trusted reconciler | Replays pending settlements and returns the integrity audit |
+| `ReconcileSettlements()` | trusted reconciler | Replays pending settlements, checks committed ones against Economy's journal, and returns the integrity audit |
 
 Amounts are integers in the currency's minor units (2500 = 25.00 dollars).
 
@@ -230,6 +231,15 @@ explicit, durable workflow.
 - **Compensation:** none is automatic. Refunding a settled obligation is a
   separate Economy operation that Contracts does not perform.
 - **Operator reconciliation:** `ContractsReconcile` in the server console.
+- **Journal check:** when feather-economy offers `GetTransaction` (capability
+  `transactionRead`), reconciliation fetches each committed settlement's
+  Economy transaction once and stores `economy_check` = `verified`,
+  `mismatch` or `missing`. It must be a committed transfer with reason
+  `contracts.settlement`, the obligation as reference, the frozen amount and
+  currency, and exactly the payer and payee entries. `economyMismatch` (both
+  `mismatch` and `missing`) must be zero; `economyUnverified` counts
+  settlements not checked yet. Up to `Config.Settlement.verifyBatchSize` are
+  checked per run.
 
 Economy does not infer that a transfer satisfies an obligation; Contracts
 stores that correlation.
@@ -274,7 +284,7 @@ Checksummed migrations in `server/migrations/`, ledger
 | `contract_obligations` | Obligation terms, lifecycle, frozen creditor account, settlement reference |
 | `contract_actions` | Append-only audit: every transition with actor, reason, correlation, request, Economy transaction |
 | `contract_receipts` | Idempotency receipts |
-| `contract_settlements` | Settlement workflow records |
+| `contract_settlements` | Settlement workflow records and their Economy journal check |
 | `contract_outbox` | Pending and published events |
 
 Never edit applied migrations; add a new numbered migration. Back up these
@@ -289,7 +299,7 @@ Server console:
 ContractsFoundationSmokeTest     read-only
 ContractsAuditSmokeTest          read-only integrity audit
 ContractsReleaseSmokeTest        read-only production checks
-ContractsReconcile               replays pending settlements, prints integrity report
+ContractsReconcile               replays pending settlements, checks the Economy journal, prints integrity report
 ```
 
 With `Config.DevMode = true` on an isolated development server only:
@@ -302,19 +312,28 @@ The live test registers two development types owned by feather-contracts,
 then exercises draft replay and payload conflict, issuance, acceptance,
 settlement replay, the double-payment guard (or the insufficient-funds path
 when the debtor has no funds), dispute and upheld resolution, stale-revision
-rejection, cancellation, and scheduler due/default processing. It moves at
-most 0.01 from debtor to creditor and leaves one defaulted 0.01 fine as
+rejection, cancellation, and scheduler due/default processing.
+
+When the debtor can pay, it also checks recovery after an Economy timeout: a
+DevMode-only hook lets the transfer post but drops Economy's reply, the
+settlement must stay pending, and a replay must settle it without a second
+transfer. With `GetTransaction` available, both settlements must then match
+Economy's journal.
+
+The debtor needs at least 0.02 of the currency. The test moves 0.01 to the
+creditor and 0.01 to the system sink, and leaves one defaulted 0.01 fine as
 evidence. Issuance requires a policy grant for feather-contracts itself while
-policy is enabled. Disable DevMode and restart before release.
+policy is enabled. Disable DevMode, remove that grant and restart before
+release.
 
 ## Known limits
 
 - Organization creditors and debtors need an Economy contract addition
   (wallet-to-treasury and treasury-debit transfers for `contracts.settlement`).
 - No amendment workflow (`amendments = 0` in capabilities).
-- The integrity audit checks Contracts' own records. Confirming each
-  settlement against Economy's journal needs an Economy read export for
-  transactions, which does not exist yet.
+- The Economy journal check needs `GetTransaction` in feather-economy. Without
+  it, reconciliation reports the journal as unavailable and checks only
+  Contracts' own records.
 - Settlement replay after Economy is permanently unavailable keeps the
   settlement pending indefinitely; `settlement.stuck` is logged after
   `Config.Settlement.maximumAttempts`.

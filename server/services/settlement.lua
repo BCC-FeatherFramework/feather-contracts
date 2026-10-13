@@ -333,10 +333,66 @@ function ContractsSettlement.Audit()
             JOIN `contract_obligations` o ON o.`obligation_id`=s.`obligation_id`
             WHERE s.`amount`<>o.`amount` OR s.`currency`<>o.`currency`
                OR s.`payee_account_id`<>o.`creditor_account_id`]]),
+        economyMismatch = Count([[SELECT COUNT(*) FROM `contract_settlements`
+            WHERE `status`='committed' AND `economy_check` IN ('mismatch','missing')]]),
+        economyUnverified = Count([[SELECT COUNT(*) FROM `contract_settlements`
+            WHERE `status`='committed' AND `economy_check` IS NULL]]),
         pendingSettlements = Count("SELECT COUNT(*) FROM `contract_settlements` WHERE `status`='pending'"),
         stuckSettlements = Count(([[SELECT COUNT(*) FROM `contract_settlements`
             WHERE `status`='pending' AND `attempts` >= %d]]):format(Config.Settlement.maximumAttempts))
     }
+end
+
+-- Compares one committed settlement with the Economy transaction it recorded.
+local function CheckAgainstJournal(settlement)
+    local found = ContractsEconomy.GetTransaction(settlement.economy_transaction_id)
+    if not found.ok then
+        if found.code == 'transaction_not_found' then return 'missing' end
+        return nil, found.code
+    end
+    local tx = found.value
+    local paid, received = false, false
+    for _, entry in ipairs(type(tx.entries) == 'table' and tx.entries or {}) do
+        local amount = tonumber(entry.amount)
+        if entry.accountId == settlement.payer_account_id and amount == -tonumber(settlement.amount) then paid = true end
+        if entry.accountId == settlement.payee_account_id and amount == tonumber(settlement.amount) then received = true end
+    end
+    local matches = tx.status == 'committed' and tx.operation == 'transfer'
+        and tx.reasonCode == Config.Settlement.reasonCode and tx.referenceType == Config.Settlement.referenceType
+        and tx.referenceId == settlement.obligation_id and tx.currency == settlement.currency
+        and tonumber(tx.amount) == tonumber(settlement.amount)
+        and type(tx.entries) == 'table' and #tx.entries == 2 and paid and received
+    return matches and 'verified' or 'mismatch'
+end
+
+-- Checks committed settlements not yet compared with Economy's journal. Each
+-- result is stored, so every settlement is fetched from Economy once.
+function ContractsSettlement.VerifyWithEconomy(limit)
+    if not ContractsEconomy.CanReadTransactions() then
+        return { available = false, checked = 0, verified = 0, mismatch = 0, missing = 0 }
+    end
+    local summary = { available = true, checked = 0, verified = 0, mismatch = 0, missing = 0, deferred = 0 }
+    local rows = DB.query([[SELECT `settlement_id`,`obligation_id`,`payer_account_id`,`payee_account_id`,`amount`,
+            `currency`,`economy_transaction_id` FROM `contract_settlements`
+        WHERE `status`='committed' AND `economy_check` IS NULL ORDER BY `completed_at`,`settlement_id` LIMIT ?]],
+        limit) or {}
+    for _, row in ipairs(rows) do
+        local outcome, code = CheckAgainstJournal(row)
+        if outcome then
+            DB.exec([[UPDATE `contract_settlements` SET `economy_check`=?,`economy_checked_at`=CURRENT_TIMESTAMP
+                WHERE `settlement_id`=? AND `economy_check` IS NULL]], outcome, row.settlement_id)
+            summary.checked = summary.checked + 1
+            summary[outcome] = summary[outcome] + 1
+            if outcome ~= 'verified' then
+                logger.Error('settlement.journal_' .. outcome, { settlementId = row.settlement_id,
+                    obligationId = row.obligation_id, transactionId = row.economy_transaction_id })
+            end
+        else
+            summary.deferred = summary.deferred + 1
+            logger.Warn('settlement.journal_unavailable', { settlementId = row.settlement_id, code = code })
+        end
+    end
+    return summary
 end
 
 function ContractsSettlement.Reconcile(resource)
@@ -346,10 +402,12 @@ function ContractsSettlement.Reconcile(resource)
     local ready = ContractsFoundation.RequireReady()
     if not ready.ok then return ready end
     local processed = ContractsSettlement.ProcessPending(Config.Scheduler.batchSize, true)
+    local journal = ContractsSettlement.VerifyWithEconomy(Config.Settlement.verifyBatchSize)
     local audit = ContractsSettlement.Audit()
     local healthy = true
     for key, value in pairs(audit) do
-        if key ~= 'pendingSettlements' and key ~= 'stuckSettlements' and value ~= 0 then healthy = false end
+        if key ~= 'pendingSettlements' and key ~= 'stuckSettlements' and key ~= 'economyUnverified'
+            and value ~= 0 then healthy = false end
     end
-    return Ok({ processed = processed, audit = audit, healthy = healthy })
+    return Ok({ processed = processed, journal = journal, audit = audit, healthy = healthy })
 end

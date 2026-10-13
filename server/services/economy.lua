@@ -81,6 +81,10 @@ function ContractsEconomy.ResolveDebtorWallet(characterId, currency)
     return FindOwnerAccount('character', characterId, 'wallet', currency)
 end
 
+-- DevMode acceptance only: the next N transfers post in Economy but their reply
+-- is dropped, as if Economy timed out after the money moved.
+ContractsEconomy.simulatedLostReplies = 0
+
 -- Returns Ok({ outcome = 'committed'|'rejected'|'unknown', transactionId, code }).
 function ContractsEconomy.Settle(settlement)
     local result = Call('Transfer', {
@@ -97,6 +101,11 @@ function ContractsEconomy.Settle(settlement)
         actorCharacterId = settlement.actor_character_id,
         correlationId = settlement.correlation_id
     })
+    if Config.DevMode and ContractsEconomy.simulatedLostReplies > 0 then
+        ContractsEconomy.simulatedLostReplies = ContractsEconomy.simulatedLostReplies - 1
+        logger.Warn('settle.reply_dropped', { settlementId = settlement.settlement_id, posted = result.ok })
+        return Ok({ outcome = 'unknown', code = 'simulated_timeout' })
+    end
     if result.ok then
         local value = type(result.value) == 'table' and result.value or {}
         if not ContractsValidation.Uuid(value.transactionId)
@@ -113,4 +122,16 @@ function ContractsEconomy.Settle(settlement)
         return Ok({ outcome = 'rejected', code = result.code, details = result.details })
     end
     return Ok({ outcome = 'unknown', code = result.code })
+end
+
+-- True when Economy offers GetTransaction (capability feature transactionRead).
+function ContractsEconomy.CanReadTransactions()
+    local capabilities = Call('GetCapabilities')
+    return capabilities.ok and type(capabilities.value) == 'table' and type(capabilities.value.features) == 'table'
+        and (tonumber(capabilities.value.features.transactionRead) or 0) >= 1
+end
+
+-- Economy only returns transactions Contracts posted itself.
+function ContractsEconomy.GetTransaction(transactionId)
+    return Call('GetTransaction', { transactionId = transactionId })
 end
