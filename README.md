@@ -12,18 +12,18 @@ moves only in Feather Economy. Contracts is not a quest or scripting engine.
 
 Status: implements phases C1–C3 of the
 [Contracts master plan](https://github.com/FeatherFramework/feather-framework-docs/blob/main/feather-contracts/Feather_Contracts_Master_Plan.md),
-plus the type registry C4 needs to prove a second obligation type. It has not
-yet passed live acceptance.
+plus C4: `bcc-housing` issues real property tax and rent obligations. Live
+acceptance passed on the development server on 2026-10-13.
 
 | Gate | State |
 |---|---|
-| `ContractsFoundationSmokeTest` (17 checks) | Passed 17/17 on the server 2026-10-13 |
+| `ContractsFoundationSmokeTest` (17 checks) | Passed 17/17 on the server 2026-10-13 (again after migration 002) |
 | `ContractsAuditSmokeTest` (12 checks) | Passed 12/12 on the server 2026-10-13 |
 | `ContractsReleaseSmokeTest` (6 checks) | Passed 6/6 on the server 2026-10-13 |
-| `ContractsReconcile` | Healthy on the server 2026-10-13 (no settlements yet) |
-| `ContractsLiveTest` (DevMode, runs offline) | Not yet run; now includes the Economy timeout recovery and journal checks |
-| Settlement checked against Economy's journal | Implemented; needs feather-economy with `GetTransaction` (`transactionRead`) |
-| Real issuer (C4) | `bcc-housing` property tax and rent implemented, not yet run live |
+| `ContractsLiveTest` (DevMode, runs offline) | Passed 25/25 on the server 2026-10-13: idempotent settlement, no double payment, recovery after an Economy timeout, journal match, disputes, cancellation, due/default |
+| Real issuer (C4) | Passed 2026-10-13: a `bcc-housing` property tax (600 dollars, house 1) issued and collected through Contracts |
+| `ContractsReconcile` | Healthy 2026-10-13: 3 settlements, all verified against Economy's journal (needs feather-economy `GetTransaction`) |
+| Not yet exercised | Housing overdue and arrears path; `housing_rent` |
 
 ## Dependencies and start order
 
