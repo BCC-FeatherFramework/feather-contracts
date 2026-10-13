@@ -15,6 +15,15 @@ Status: implements phases C1–C3 of the
 plus the type registry C4 needs to prove a second obligation type. It has not
 yet passed live acceptance.
 
+| Gate | State |
+|---|---|
+| `ContractsFoundationSmokeTest` (17 checks) | Passed 17/17 on the server 2026-10-13 |
+| `ContractsAuditSmokeTest` (12 checks) | Passed 12/12 on the server 2026-10-13 |
+| `ContractsReleaseSmokeTest` (6 checks) | Passed 6/6 on the server 2026-10-13 |
+| `ContractsReconcile` | Healthy on the server 2026-10-13 (no settlements yet) |
+| `ContractsLiveTest` (DevMode, two players) | Not yet run |
+| Second obligation type (C4) through a real issuer | Not yet proven |
+
 ## Dependencies and start order
 
 ```text
