@@ -56,7 +56,12 @@ so Economy must trust it. Add `feather-contracts` to these lists in
 ```lua
 trustedReaders      = { ['feather-contracts'] = true, ... }
 trustedTransactors  = { ['feather-contracts'] = true, ... }
+trustedSettlers     = { ['feather-contracts'] = true, ... }  -- organization parties
 ```
+
+Organization creditors and debtors need feather-economy with the
+`organizationSettlement` capability; Contracts checks it at startup while either
+is enabled in `Config.Settlement`.
 
 Contracts is never a provisioner, reverser, or supplier: it cannot create
 wallets or currency.
@@ -94,6 +99,7 @@ obligations that already exist: each obligation snapshots its lifecycle flags.
 | `label` | required | Display label (not an identifier) |
 | `issuerTypes` | required | Allowed issuer parties: `character`, `organization`, `system` |
 | `creditorTypes` | required | Allowed creditor parties (must be enabled in `Config.Settlement.creditorTypes`) |
+| `debtorTypes` | `{ 'character' }` | Allowed debtor parties: `character`, `organization` (must be enabled in `Config.Settlement.debtorTypes`) |
 | `requiresAcceptance` | `false` | Debtor must accept before the obligation can be paid or fall due |
 | `debtorMaySettle` | `true` | Debtor may pay it (client route or owner with `actorSource`) |
 | `issuerMaySettle` | `false` | The owning resource may collect from the debtor's wallet without the debtor acting |
@@ -103,12 +109,17 @@ obligations that already exist: each obligation snapshots its lifecycle flags.
 | `maximumDueSeconds` | config limit | Longest allowed due period |
 | `defaultAfterSeconds` | none | When set, a due obligation defaults automatically this long after its due date |
 
-**Parties.** In v1 the debtor is always a character. Creditors can be a
-character (paid into their wallet) or the system (paid into Economy's system
-sink, for example fines and taxes). Organization creditors are modelled but
-disabled: Feather Economy currently allows wallet-to-treasury transfers only
-for shop purchases, and Contracts refuses to issue an obligation it could
-never settle.
+**Parties.** The debtor is a character (paying from their wallet) or an
+organization (paying from its treasury). Creditors can be a character (paid
+into their wallet), an organization (paid into its treasury) or the system
+(paid into Economy's system sink, for example fines and taxes). The creditor
+account is frozen at issuance.
+
+An organization debtor acts through the resource its treasury is bound to in
+Economy (operated accounts): only that resource may accept, dispute or pay its
+obligations, and no client route acts for it. The issuing resource cannot
+spend an organization's treasury, even with `issuerMaySettle`; Economy enforces
+the same rule on the transfer.
 
 **Lifecycle.**
 
@@ -182,7 +193,7 @@ local issued = contracts:IssueObligation({
 | `CancelObligation({ requestId, obligationId, reasonCode, expectedRevision? }, context?)` | type owner | Policy `contracts.obligation.cancel` |
 | `MarkDefaulted({ requestId, obligationId, reasonCode, expectedRevision? }, context?)` | type owner | Policy `contracts.obligation.default`; from `due` only |
 | `GetObligation({ obligationId })` | owner, issuer, trusted reader | Others receive `obligation_not_found` |
-| `ListPartyObligations({ party, role?, statuses?, obligationType?, limit?, cursor? })` | trusted reader, or owner filtering its own type | Cursor-paginated, newest first |
+| `ListPartyObligations({ party, role?, statuses?, obligationType?, limit?, cursor? })` | trusted reader, owner filtering its own type, or the resource operating the organization party's treasury | Cursor-paginated, newest first |
 | `ReconcileSettlements()` | trusted reconciler | Replays pending settlements, checks committed ones against Economy's journal, and returns the integrity audit |
 
 Amounts are integers in the currency's minor units (2500 = 25.00 dollars).
@@ -330,10 +341,23 @@ evidence. Issuance requires a policy grant for feather-contracts itself while
 policy is enabled. Disable DevMode, remove that grant and restart before
 release.
 
+Organization parties, also with nobody online:
+
+```text
+ContractsOrganizationTest <character id|UUID> <organizationUuid> <fresh runId> [currency]
+```
+
+The organization's treasury must be bound to an operator resource in Economy.
+A character pays 0.01 into the treasury (organization creditor, frozen treasury
+account); then the organization owes 0.01 to the system: a non-operator cannot
+accept for it, its operator accepts, the issuer cannot spend the treasury, and
+the operator pays. The treasury ends at its starting balance, and both
+settlements must match Economy's journal. The operator's actions run in its
+name through the service layer.
+
 ## Known limits
 
-- Organization creditors and debtors need an Economy contract addition
-  (wallet-to-treasury and treasury-debit transfers for `contracts.settlement`).
+- Organization parties need feather-economy with `organizationSettlement`.
 - No amendment workflow (`amendments = 0` in capabilities).
 - The Economy journal check needs `GetTransaction` in feather-economy. Without
   it, reconciliation reports the journal as unavailable and checks only

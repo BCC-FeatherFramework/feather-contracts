@@ -32,13 +32,18 @@ Config = {
     Settlement = {
         reasonCode = 'contracts.settlement',
         referenceType = 'contract_obligation',
-        -- Creditor party types accepted at issuance. Organization treasuries stay
-        -- disabled until feather-economy permits contract settlement into them;
-        -- Contracts refuses to issue an obligation it could never settle.
+        -- Party types accepted at issuance. Organization parties settle through
+        -- their treasury and need feather-economy with organizationSettlement and
+        -- feather-contracts in its trustedSettlers; Contracts refuses to issue an
+        -- obligation it could never settle.
         creditorTypes = {
             character = true,
             system = true,
-            organization = false
+            organization = true
+        },
+        debtorTypes = {
+            character = true,
+            organization = true
         },
         -- A settlement whose Economy outcome is unknown stays pending and is
         -- replayed with its original idempotency key after this delay.
