@@ -23,7 +23,8 @@ acceptance passed on the development server on 2026-10-13.
 | `ContractsLiveTest` (DevMode, runs offline) | Passed 25/25 on the server 2026-10-13: idempotent settlement, no double payment, recovery after an Economy timeout, journal match, disputes, cancellation, due/default |
 | Real issuer (C4) | Passed 2026-10-13: a `bcc-housing` property tax (600 dollars, house 1) issued and collected through Contracts |
 | `ContractsReconcile` | Healthy 2026-10-13: 3 settlements, all verified against Economy's journal (needs feather-economy `GetTransaction`) |
-| Not yet exercised | Housing overdue and arrears path; `housing_rent` |
+| Organization parties | Passed 2026-10-16: `ContractsOrganizationTest` 9/9 (character pays an organization treasury; organization debt accepted and paid only by its treasury operator; both settlements verified against Economy's journal) |
+| Not yet exercised | `housing_rent` |
 
 ## Dependencies and start order
 
