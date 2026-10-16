@@ -235,25 +235,26 @@ RegisterCommand('ContractsLiveTest', function(source, args)
         lostReady = lostReady.ok and ContractsObligations.AcceptObligation({ requestId = key('t-accept'),
             obligationId = lostId }, Actor(debtorId), resourceName, false) or lostReady
         if lostReady.ok then
+            -- The debtor's balance, read through Economy's exports (never its tables).
+            local function Balance()
+                local wallet = ContractsEconomy.ResolveDebtorAccount({ type = 'character', id = debtorId }, currency)
+                return wallet.ok and tonumber(wallet.value.balance) or nil
+            end
+            local before = Balance()
             ContractsEconomy.simulatedLostReplies = 1
             local lost = ContractsSettlement.SettleObligation({ requestId = key('t-settle'), obligationId = lostId },
                 Actor(debtorId), resourceName, false)
             ContractsEconomy.simulatedLostReplies = 0
-            local pendingRow = DB.one([[SELECT `settlement_id`,`economy_idempotency_key` FROM `contract_settlements`
+            local pendingRow = DB.one([[SELECT `settlement_id` FROM `contract_settlements`
                 WHERE `obligation_id`=? AND `status`='pending']], lostId)
-            local function Posted()
-                return pendingRow and tonumber(DB.value([[SELECT COUNT(*) FROM `economy_transactions`
-                    WHERE `source_resource`=? AND `idempotency_key`=? AND `status`='committed']],
-                    resourceName, pendingRow.economy_idempotency_key)) or -1
-            end
             t.Check('timeout leaves settlement pending', not lost.ok and lost.code == 'settlement_pending'
                 and pendingRow ~= nil)
-            t.Check('money moved during timeout', Posted() == 1)
+            t.Check('money moved during timeout', before ~= nil and Balance() == before - 1)
             ContractsSettlement.ProcessPending(Config.Scheduler.batchSize, true)
             local recovered = ContractsObligationRepository.Get(lostId)
             t.Check('replay settles after timeout', recovered.ok and recovered.value.status == 'settled'
                 and recovered.value.settlementState == 'none')
-            t.Check('no second transfer after timeout', Posted() == 1)
+            t.Check('no second transfer after timeout', before ~= nil and Balance() == before - 1)
         else
             t.Check('timeout obligation ready', false)
         end
