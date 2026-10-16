@@ -16,6 +16,7 @@ server_scripts {
     'server/logging.lua',
     'server/migrations/001_contracts_foundation.lua',
     'server/migrations/002_settlement_economy_check.lua',
+    'server/migrations/003_organization_debtors.lua',
     'server/persistence/migrations.lua',
     'server/services/foundation.lua',
     'server/services/validation.lua',

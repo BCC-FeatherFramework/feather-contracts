@@ -31,7 +31,7 @@ RegisterCommand('ContractsFoundationSmokeTest', function(source)
         and health.checks['feather-economy'] ~= nil and health.checks.events ~= nil)
     t.Check('migration ledger', tonumber(DB.value(
         "SELECT COUNT(*) FROM `contract_schema_migrations` WHERE `id` IN ('001_contracts_foundation',"
-            .. "'002_settlement_economy_check')")) == 2)
+            .. "'002_settlement_economy_check','003_organization_debtors')")) == 3)
 
     local accepted = ContractsTypes.Transitions(true, true)
     local direct = ContractsTypes.Transitions(false, false)
