@@ -9,7 +9,8 @@ Config = {
         -- cancel, default, or resolve disputes for obligations of that type.
         trustedIssuers = {
             ['bcc-housing'] = true,
-            ['bcc-banks'] = true -- loan installments owed to a branch organization
+            ['bcc-banks'] = true, -- loan installments owed to a branch organization
+            ['feather-justice'] = true -- citations, sentence fines and restitution
         },
         -- Resources allowed to read any obligation (support and admin tooling).
         -- Type owners can always read obligations of their own types.
